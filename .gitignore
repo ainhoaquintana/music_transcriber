@@ -1,6 +1,8 @@
 /src/__pycache__
 /src/outputs
+/src/data
 /src/plots
+/src/precomputed    
 /checkpoints
 /data
 /.venv   

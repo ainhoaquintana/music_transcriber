@@ -5,14 +5,16 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, random_split
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
+import numpy as np
+
 from dataset import MaestroDataset
 from model import CnnTransformerTranscriber
-import numpy as np
 from test import evaluate
 from utils import collate_fn
-from tqdm import tqdm
 
-MAX_LEN = 2048  
+WINDOW_SIZE = 2048  # frames por ventana
+STRIDE = 1024       # overlap entre ventanas
 
 class EarlyStopping:
     def __init__(self, patience=5, delta=0):
@@ -25,7 +27,6 @@ class EarlyStopping:
 
     def __call__(self, val_loss, model):
         score = -val_loss
-
         if self.best_score is None:
             self.best_score = score
             self.best_model_state = model.state_dict()
@@ -41,66 +42,83 @@ class EarlyStopping:
     def load_best_model(self, model):
         model.load_state_dict(self.best_model_state)
 
-def train_one_epoch(model, dataloader, optimizer, criterion_notes, criterion_durs, device):
+
+def train_one_epoch(model, dataloader, optimizer, criterion_notes, criterion_durs, device, window_size=WINDOW_SIZE, stride=STRIDE):
     model.train()
     running_loss = 0.0
     for mel, notes, durs in tqdm(dataloader, desc="Training", leave=False):
-        mel = mel.to(device)          # (batch, T, n_mels)
-        notes = notes.to(device)      # (batch, T, 88)
-        durs = durs.to(device)        # (batch, T, 88)
-        
-        # if device.type == "cuda":
-        #     print("After data to device:")
-        #     print(torch.cuda.memory_summary())
+        mel = mel.to(device)
+        notes = notes.to(device)
+        durs = durs.to(device)
 
-        
+        # Sliding window
+        B, T, _ = mel.shape
+        start_indices = list(range(0, T, stride))
         optimizer.zero_grad()
-        logits, dur_preds = model(mel) # logits: (B, T_reduced, n_notes), dur_preds: (B, T_reduced, n_notes)
+        total_loss = 0.0
 
-        loss_notes = criterion_notes(logits, notes)
-        loss_durs = criterion_durs(dur_preds, durs)
-        # loss = loss_notes + loss_durs
-        loss = loss_notes + 0.5 * loss_durs ##################################
+        for start in start_indices:
+            end = min(start + window_size, T)
+            mel_chunk = mel[:, start:end, :]
+            notes_chunk = notes[:, start:end, :]
+            durs_chunk = durs[:, start:end, :]
 
+            logits, dur_preds = model(mel_chunk)
+            dur_preds = F.relu(dur_preds)
 
-        loss.backward()
+            loss_notes = criterion_notes(logits, notes_chunk)
+            loss_durs = criterion_durs(dur_preds, durs_chunk)
+            loss = loss_notes + 0.5 * loss_durs
+
+            loss.backward()
+            total_loss += loss.item() * mel_chunk.size(0)
+
         optimizer.step()
-
-        running_loss += loss.item() * mel.size(0)
+        running_loss += total_loss
 
     return running_loss / len(dataloader.dataset)
 
-def validate(model, dataloader, criterion_notes, criterion_durs, device):
+
+def validate(model, dataloader, criterion_notes, criterion_durs, device, window_size=WINDOW_SIZE, stride=STRIDE):
     model.eval()
-    val_loss = 0
+    val_loss = 0.0
     with torch.no_grad():
         for mel, notes, durs in tqdm(dataloader, desc="Validating", leave=False):
-            mel = mel.to(device)          # (batch, T, n_mels)
-            notes = notes.to(device)      # (batch, T, 88)
-            durs = durs.to(device)        # (batch, T, 88)
-            logits, dur_preds = model(mel)
+            mel = mel.to(device)
+            notes = notes.to(device)
+            durs = durs.to(device)
 
-            loss_notes = criterion_notes(logits, notes)
-            loss_durs = criterion_durs(dur_preds, durs)
-            # loss = loss_notes + loss_durs
-            loss = loss_notes + 0.5 * loss_durs ##################################
+            B, T, _ = mel.shape
+            start_indices = list(range(0, T, stride))
+            total_loss = 0.0
 
+            for start in start_indices:
+                end = min(start + window_size, T)
+                mel_chunk = mel[:, start:end, :]
+                notes_chunk = notes[:, start:end, :]
+                durs_chunk = durs[:, start:end, :]
 
-            val_loss += loss.item() * mel.size(0)
+                logits, dur_preds = model(mel_chunk)
+                dur_preds = F.relu(dur_preds)
+                loss_notes = criterion_notes(logits, notes_chunk)
+                loss_durs = criterion_durs(dur_preds, durs_chunk)
+                loss = loss_notes + 0.5 * loss_durs
+                total_loss += loss.item() * mel_chunk.size(0)
+
+            val_loss += total_loss
 
     return val_loss / len(dataloader.dataset)
+
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
-    torch.cuda.empty_cache() 
+    torch.cuda.empty_cache()
 
-    # Cargar dataset
+    # Dataset
     root_dir = "../data/maestro-v3.0.0/audios"
-    # root_dir = "../data/maestro-v3.0.0"  #
     dataset = MaestroDataset(root_dir=root_dir)
 
-    # Split into train (70%), val (15%), test (15%)
     n_total = len(dataset)
     n_train = int(0.7 * n_total)
     n_val = int(0.15 * n_total)
@@ -112,77 +130,61 @@ def main():
     val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
     test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
-    model = CnnTransformerTranscriber(d_model=512, num_layers=6, nhead=8) 
+    # Modelo
+    model = CnnTransformerTranscriber(d_model=512, num_layers=6, nhead=8)
     model.to(device)
 
     num_epochs = 15
-    
-    criterion_notes = nn.BCEWithLogitsLoss()
+    pos_weight = torch.load("precomputed/pos_weight.pt").to(device)
+    criterion_notes = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     criterion_durs = nn.MSELoss()
-    # optimizer = optim.Adam(model.parameters(), lr=0.0001)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.0001)#########################
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001, weight_decay=0.0001)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    early_stopping = EarlyStopping(patience=5, delta=0.01)
 
-    # early_stopping = EarlyStopping(patience=5, delta=0.01)
+    train_losses, val_losses = [], []
 
-    train_losses = []
-    val_losses = []
-
-    print("Starting training...")
     for epoch in range(num_epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion_notes, criterion_durs, device)
         val_loss = validate(model, val_loader, criterion_notes, criterion_durs, device)
-
         scheduler.step()
-        print(f"Epoch {epoch+1}/{num_epochs} - Train loss: {train_loss:.4f} - Val loss: {val_loss:.4f} -  LR: {scheduler.get_last_lr()[0]:.6f}")
-
         train_losses.append(train_loss)
         val_losses.append(val_loss)
 
-         # Visualize mel spectrogram and note targets for the first batch
-        mel_batch, notes_batch, durs_batch = next(iter(train_loader))
-        mel = mel_batch[0].cpu().numpy().T  # (n_mels, T)
-        notes = notes_batch[0].cpu().numpy().T  # (88, T)
+        print(f"Epoch {epoch+1}/{num_epochs} - Train: {train_loss:.4f}, Val: {val_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}")
 
-        plt.figure(figsize=(12, 8))
-        plt.subplot(2, 1, 1)
-        plt.imshow(mel, aspect='auto', origin='lower', cmap='viridis')
-        plt.title('Mel Spectrogram (Training Sample)')
-        plt.ylabel('Mel bins')
-        plt.colorbar()
+        early_stopping(val_loss, model)
+        if early_stopping.early_stop:
+            print("Early stopping triggered")
+            break
 
-        plt.subplot(2, 1, 2)
-        plt.imshow(notes, aspect='auto', origin='lower', cmap='hot')
-        plt.title('Note Targets (Training Sample)')
-        plt.xlabel('Time (frames)')
-        plt.ylabel('MIDI pitch')
-        plt.colorbar()
+        # Diagnostics
+        mel_batch, notes_batch, _ = next(iter(train_loader))
+        model.eval()
+        with torch.no_grad():
+            mel_batch = mel_batch.to(device)
+            logits, _ = model(mel_batch)
+            probs = torch.sigmoid(logits)
+            avg_probs = probs.mean(dim=(0,1)).cpu().numpy()
+            plt.bar(range(88), avg_probs)
+            plt.xlabel("MIDI note (0–87)")
+            plt.ylabel("Average predicted probability")
+            plt.title(f"Epoch {epoch+1} note activations")
+            os.makedirs("plots/diagnostics", exist_ok=True)
+            plt.savefig(f"plots/diagnostics/epoch_{epoch+1}_note_probs.png")
+            plt.close()
+        model.train()
+        torch.cuda.empty_cache()
 
-        plt.tight_layout()
-        # plt.show()
-        if not os.path.exists("plots"):
-            os.makedirs("plots")
-        plt.savefig(f"plots/epoch_{epoch+1}.png")
-        plt.close()
-
-    #     early_stopping(val_loss, model)
-    #     if early_stopping.early_stop:
-    #         print("Early stopped")
-    #         break
-
-    # early_stopping.load_best_model(model)
-      
-        # if device.type == "cuda":
-        #     print(torch.cuda.memory_summary())
-
-    # Guardamos el modelo entrenado
+    # Guardar mejor modelo
     model_path = "../checkpoints/modelo_entrenado.pth"
-    if not os.path.exists("../checkpoints"):
-        os.makedirs("../checkpoints")
-    print(f"Saving model to {model_path}")
+    os.makedirs("../checkpoints", exist_ok=True)
+    early_stopping.load_best_model(model)
     torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
 
-    # Visualize learning curve
+    # Learning curve
     plt.plot(train_losses, label="Train Loss")
     plt.plot(val_losses, label="Val Loss")
     plt.xlabel("Epoch")
@@ -190,10 +192,11 @@ def main():
     plt.title("Learning Curve")
     plt.legend()
     plt.show()
-    
-    # Evaluate on test set
+
+    # Test
     test_loss, test_acc = evaluate(model, test_loader, criterion_notes, criterion_durs, device)
-    print(f"Test loss: {test_loss:.4f} - Test accuracy: {test_acc:.4f}")
+    print(f"Test loss: {test_loss:.4f}, Test accuracy: {test_acc:.4f}")
+
 
 if __name__ == "__main__":
     main()

@@ -27,13 +27,13 @@ def collate_fn(batch):
         notes_padded = F.pad(notes, (0,0,0,pad_len), "constant", 0)
         durs_padded = F.pad(durs, (0,0,0,pad_len), "constant", 0)
 
-        notes_down = notes_padded[::2]
-        durs_down = durs_padded[::2]
+        # notes_down = notes_padded[::2]
+        # durs_down = durs_padded[::2]
 
 
         mel_list.append(mel_padded)
-        notes_list.append(notes_down)
-        durs_list.append(durs_down)
+        notes_list.append(notes_padded)
+        durs_list.append(durs_padded)
 
     mel_batch = torch.stack(mel_list)       # (B, max_len, n_mels)
     notes_batch = torch.stack(notes_list)   # (B, max_len, 88)
