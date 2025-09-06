@@ -1,42 +1,49 @@
-import os
 import torch
-from itertools import islice
-from torch.utils.data import DataLoader
-from dataset import MaestroDataset
+from torch.utils.data import DataLoader, ConcatDataset
+from dataset import MaestroDataset, MusicNetDataset
 from utils import collate_fn
+import os
 
-# -------------------- CONFIG --------------------
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-root_dir = "../data/maestro-v3.0.0/audios"
-num_batches = 200  # number of batches to estimate pos_weight
-batch_size = 2
-save_path = "precomputed/pos_weight.pt"
-# ------------------------------------------------
 
-# Create dataset and DataLoader
-dataset = MaestroDataset(root_dir=root_dir)
-loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+def main():
+    # Paths
+    maestro_root = "../data/maestro-v3.0.0/audios"
+    musicnet_root = "../data/musicnet_audios"
 
-# Initialize counters
-total_pos = torch.zeros(88, dtype=torch.long)
-total_neg = torch.zeros(88, dtype=torch.long)
+    # Cargar datasets
+    maestro_dataset = MaestroDataset(root_dir=maestro_root)
+    musicnet_dataset = MusicNetDataset(root_dir=musicnet_root)
 
-print(f"Computing pos_weight using the first {num_batches} batches...")
+    print(f"Audios Maestro válidos: {len(maestro_dataset)}")
+    print(f"Audios MusicNet válidos: {len(musicnet_dataset)}")
 
-# Iterate only over the first num_batches batches
-for i, (_, notes, _) in enumerate(islice(loader, num_batches)):
-    notes = notes.view(-1, 88)  # flatten (B*T, 88)
-    total_pos += notes.sum(dim=0).long()
-    total_neg += (1 - notes).sum(dim=0).long()
+    # Unir ambos datasets
+    combined_dataset = ConcatDataset([maestro_dataset, musicnet_dataset])
+    loader = DataLoader(combined_dataset, batch_size=4, collate_fn=collate_fn)
 
-# Compute pos_weight
-pos_weight = total_neg.float() / (total_pos.float() + 1e-6)
-pos_weight = pos_weight.to(device)
+    onset_sum = 0
+    frame_sum = 0
+    total_elements = 0
 
-# Save to file
-os.makedirs(os.path.dirname(save_path), exist_ok=True)
-torch.save(pos_weight.cpu(), save_path)
+    # Recorremos todos los datos para calcular proporciones
+    for mel, onsets, frames in loader:
+        onset_sum += onsets.sum().item()
+        frame_sum += frames.sum().item()
+        total_elements += onsets.numel()
 
-print(f"pos_weight saved to {save_path}")
-print("Sample pos_weight (first 10 notes):", pos_weight[:10].cpu().numpy())
-print("Computation completed.")
+    # Pesos positivos (más grandes si hay mucho desbalance)
+    pos_weight_onsets = torch.tensor((total_elements - onset_sum) / onset_sum)
+    pos_weight_frames = torch.tensor((total_elements - frame_sum) / frame_sum)
+
+    # Guardar resultados
+    os.makedirs("precomputed", exist_ok=True)
+    torch.save(pos_weight_onsets, "precomputed/pos_weight_onsets.pt")
+    torch.save(pos_weight_frames, "precomputed/pos_weight_frames.pt")
+
+    print("==== Pesos guardados en carpeta precomputed ====")
+    print(f"Pos weight onsets: {pos_weight_onsets.item():.4f}")
+    print(f"Pos weight frames: {pos_weight_frames.item():.4f}")
+
+
+if __name__ == "__main__":
+    main()
