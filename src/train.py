@@ -52,6 +52,7 @@ def train_one_epoch(model, dataloader, optimizer, criterion_onsets, criterion_fr
         optimizer.zero_grad()
         logits_onsets, logits_frames = model(mel)
 
+        # BCEWithLogitsLoss: no aplicar sigmoid antes
         loss_onsets = criterion_onsets(logits_onsets, onsets)
         loss_frames = criterion_frames(logits_frames, frames)
         loss = loss_onsets + loss_frames

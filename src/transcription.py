@@ -14,7 +14,6 @@ HOP_LENGTH = 256
 SR = 16000
 
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
-    """Run inference on long spectrograms in overlapping windows."""
     if isinstance(mel, np.ndarray):
         mel = torch.tensor(mel, dtype=torch.float32)
     if mel.ndim == 2:
@@ -38,8 +37,8 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
     return onsets_full[0], frames_full[0]
 
 def infer_notes_from_onsets_frames(model, mel, device, threshold=0.5, median_window=3):
-    """Infer notes using Onsets and Frames with median filtering to remove spurious notes."""
     onsets_logits, frames_logits = infer_with_sliding_window(model, mel, device)
+
     onsets_bin = (torch.sigmoid(onsets_logits) > threshold).int()
     frames_bin = (torch.sigmoid(frames_logits) > threshold).int()
 
@@ -61,6 +60,7 @@ def infer_notes_from_onsets_frames(model, mel, device, threshold=0.5, median_win
                 notes_bin[t, n] = 1
             elif n in active_notes and not frames_smooth[t, n]:
                 active_notes.pop(n)
+
     return notes_bin
 
 def audio_to_mel(audio_path, sr=SR, n_mels=229, hop_length=HOP_LENGTH):
@@ -75,18 +75,7 @@ def detect_tempo(audio_path, sr=SR):
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     return tempo
 
-def round_durations_to_grid(durations_sec, tempo, beat_unit=0.25):
-    """
-    Round durations to nearest rhythmic value (quarter, eighth, etc.)
-    beat_unit: fraction of whole note (0.25 = quarter note)
-    """
-    # duration of a quarter note in seconds
-    quarter_sec = 60.0 / tempo
-    grid = np.array([1, 0.5, 0.25, 0.125, 0.0625]) * quarter_sec
-    rounded = np.array([grid[np.argmin(np.abs(grid - d))] for d in durations_sec])
-    return rounded
-
-def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH, tempo_bpm=120, min_duration_sec=0.05):
+def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH, tempo_bpm=120, min_duration_sec=0.1, max_duration_sec=2.0, min_frames=3):
     midi = pretty_midi.PrettyMIDI()
     piano = pretty_midi.Instrument(program=0)
 
@@ -102,31 +91,31 @@ def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LE
             else:
                 if n in active_notes:
                     start_frame = active_notes.pop(n)
-                    duration = (t - start_frame) * frame_duration
-                    duration = max(duration, min_duration_sec)
-                    note = pretty_midi.Note(
-                        velocity=100,
-                        pitch=int(n) + 21,
-                        start=start_frame * frame_duration,
-                        end=start_frame * frame_duration + duration
-                    )
-                    piano.notes.append(note)
+                    duration_frames = t - start_frame
+                    if duration_frames >= min_frames:  # Filtrado de notas demasiado cortas
+                        duration = min(duration_frames * frame_duration, max_duration_sec)
+                        note = pretty_midi.Note(
+                            velocity=100,
+                            pitch=int(n) + 21,
+                            start=start_frame * frame_duration,
+                            end=start_frame * frame_duration + duration
+                        )
+                        piano.notes.append(note)
 
+    # Cerrar las notas que siguieron activas hasta el final
     for n, start_frame in active_notes.items():
-        duration = (T - start_frame) * frame_duration
-        duration = max(duration, min_duration_sec)
-        note = pretty_midi.Note(
-            velocity=100,
-            pitch=int(n) + 21,
-            start=start_frame * frame_duration,
-            end=start_frame * frame_duration + duration
-        )
-        piano.notes.append(note)
+        duration_frames = T - start_frame
+        if duration_frames >= min_frames:
+            duration = min(duration_frames * frame_duration, max_duration_sec)
+            note = pretty_midi.Note(
+                velocity=100,
+                pitch=int(n) + 21,
+                start=start_frame * frame_duration,
+                end=start_frame * frame_duration + duration
+            )
+            piano.notes.append(note)
 
     midi.instruments.append(piano)
-    midi.estimate_tempo()  # optional, but we'll set explicit tempo below
-    # set tempo
-    midi._PrettyMIDI__tick_scales = {0: 60.0 / tempo_bpm}  # hack para tempo
     midi.write(output_path)
     print(f"MIDI saved to {output_path}")
 
@@ -136,7 +125,6 @@ def midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=120):
     score.metadata.title = audio_name
     score.metadata.composer = "Your Name"
 
-    # Insert tempo marking
     mm = tempo.MetronomeMark(number=tempo_bpm)
     score.insert(0, mm)
 
@@ -162,8 +150,8 @@ def main(audio_path):
 
     mel = audio_to_mel(audio_path)
     tempo_bpm = detect_tempo(audio_path)
-    notes_bin = infer_notes_from_onsets_frames(model, mel, device, threshold=0.9, median_window=9)
-    notes_to_midi(notes_bin, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm)
+    notes_bin = infer_notes_from_onsets_frames(model, mel, device, threshold=0.87, median_window=9)
+    notes_to_midi(notes_bin, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm, min_frames=3)
     midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=tempo_bpm)
 
 if __name__ == "__main__":
