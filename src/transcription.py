@@ -18,8 +18,8 @@ THRESHOLD = 0.87
 MEDIAN_WINDOW = 9
 
 TOPK = 2                # máximo de notas por frame
-MIN_DURATION_SEC = 0.1 # mínimo de duración de una nota (s)
-
+MIN_DURATION_SEC = 0.10 # mínimo de duración de una nota (s)
+PITCH_OFFSET = 5        # offset de semitonos para corregir pitch
 # ---------------------------
 
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
@@ -115,7 +115,7 @@ def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LE
                         duration = min(duration, max_duration_sec)
                         note = pretty_midi.Note(
                             velocity=100,
-                            pitch=int(n) + 21,
+                            pitch=int(n) + 21 + PITCH_OFFSET,
                             start=start_frame * frame_duration,
                             end=start_frame * frame_duration + duration
                         )
@@ -129,7 +129,7 @@ def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LE
             duration = min(duration, max_duration_sec)
             note = pretty_midi.Note(
                 velocity=100,
-                pitch=int(n) + 21,
+                pitch=int(n) + 21 + PITCH_OFFSET,
                 start=start_frame * frame_duration,
                 end=start_frame * frame_duration + duration
             )
