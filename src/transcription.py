@@ -8,10 +8,19 @@ from model import CnnTransformerOnsetsFrames
 import librosa
 import numpy as np
 
+# --- Constantes globales ---
 WINDOW_SIZE = 10000
 STRIDE = 8000
 HOP_LENGTH = 256
 SR = 16000
+
+THRESHOLD = 0.87
+MEDIAN_WINDOW = 9
+
+TOPK = 2                # máximo de notas por frame
+MIN_DURATION_SEC = 0.1 # mínimo de duración de una nota (s)
+
+# ---------------------------
 
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
     if isinstance(mel, np.ndarray):
@@ -36,7 +45,7 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
     frames_full = torch.cat(frames_list, dim=1)
     return onsets_full[0], frames_full[0]
 
-def infer_notes_from_onsets_frames(model, mel, device, threshold=0.5, median_window=3):
+def infer_notes_from_onsets_frames(model, mel, device, threshold=THRESHOLD, median_window=MEDIAN_WINDOW):
     onsets_logits, frames_logits = infer_with_sliding_window(model, mel, device)
 
     onsets_bin = (torch.sigmoid(onsets_logits) > threshold).int()
@@ -61,6 +70,14 @@ def infer_notes_from_onsets_frames(model, mel, device, threshold=0.5, median_win
             elif n in active_notes and not frames_smooth[t, n]:
                 active_notes.pop(n)
 
+        # --- Top-k filtering por frame ---
+        if TOPK > 0:
+            probs = torch.sigmoid(frames_logits[t])
+            topk_idx = torch.topk(probs, TOPK).indices
+            mask = torch.zeros_like(notes_bin[t])
+            mask[topk_idx] = 1
+            notes_bin[t] = notes_bin[t] * mask
+
     return notes_bin
 
 def audio_to_mel(audio_path, sr=SR, n_mels=229, hop_length=HOP_LENGTH):
@@ -75,7 +92,8 @@ def detect_tempo(audio_path, sr=SR):
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     return tempo
 
-def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH, tempo_bpm=120, min_duration_sec=0.1, max_duration_sec=2.0, min_frames=3):
+def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH,
+                  tempo_bpm=120, min_duration_sec=MIN_DURATION_SEC, max_duration_sec=2.0, min_frames=3):
     midi = pretty_midi.PrettyMIDI()
     piano = pretty_midi.Instrument(program=0)
 
@@ -92,8 +110,9 @@ def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LE
                 if n in active_notes:
                     start_frame = active_notes.pop(n)
                     duration_frames = t - start_frame
-                    if duration_frames >= min_frames:  # Filtrado de notas demasiado cortas
-                        duration = min(duration_frames * frame_duration, max_duration_sec)
+                    duration = duration_frames * frame_duration
+                    if duration >= min_duration_sec and duration_frames >= min_frames:
+                        duration = min(duration, max_duration_sec)
                         note = pretty_midi.Note(
                             velocity=100,
                             pitch=int(n) + 21,
@@ -102,11 +121,12 @@ def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LE
                         )
                         piano.notes.append(note)
 
-    # Cerrar las notas que siguieron activas hasta el final
+    # Cerrar las notas activas hasta el final
     for n, start_frame in active_notes.items():
         duration_frames = T - start_frame
-        if duration_frames >= min_frames:
-            duration = min(duration_frames * frame_duration, max_duration_sec)
+        duration = duration_frames * frame_duration
+        if duration >= min_duration_sec and duration_frames >= min_frames:
+            duration = min(duration, max_duration_sec)
             note = pretty_midi.Note(
                 velocity=100,
                 pitch=int(n) + 21,
@@ -150,8 +170,8 @@ def main(audio_path):
 
     mel = audio_to_mel(audio_path)
     tempo_bpm = detect_tempo(audio_path)
-    notes_bin = infer_notes_from_onsets_frames(model, mel, device, threshold=0.87, median_window=9)
-    notes_to_midi(notes_bin, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm, min_frames=3)
+    notes_bin = infer_notes_from_onsets_frames(model, mel, device)
+    notes_to_midi(notes_bin, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm)
     midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=tempo_bpm)
 
 if __name__ == "__main__":
