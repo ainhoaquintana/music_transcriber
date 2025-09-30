@@ -10,6 +10,27 @@ def estimate_tempo(audio_path, sr=16000):
     tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
     return tempo, beats
 
+def audio_to_mel(audio, sr=16000, n_mels=229, hop_length=512, n_fft=2048):
+    if isinstance(audio, str):
+        y, sr = librosa.load(audio, sr=sr)
+    else:
+        y = audio
+    S = librosa.feature.melspectrogram(
+        y=y,
+        sr=sr,
+        n_mels=n_mels,
+        n_fft=n_fft,
+        hop_length=hop_length
+    )
+    S_db = librosa.power_to_db(S, ref=np.max)
+
+    # Normalización por canal (cada frecuencia)
+    mean = np.mean(S_db, axis=1, keepdims=True)
+    std = np.std(S_db, axis=1, keepdims=True)
+    S_norm = (S_db - mean) / (std + 1e-6)
+
+    return S_norm.T.astype(np.float32)  # (frames, n_mels) 
+
 def collate_fn(batch):
     # batch es lista de tuples (mel, notes, durs)
     # cada uno mel: (T_i, n_mels), notes: (T_i, 88), durs: (T_i, 88)

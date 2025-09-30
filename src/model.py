@@ -65,7 +65,12 @@ class CnnTransformerOnsetsFrames(nn.Module):
         self.fc_frames = nn.Linear(d_model + n_notes, n_notes)  # concatenamos onsets
 
     def forward(self, mel):
-        # mel: (B, T, n_mels)
+        """
+        mel: (B, T, n_mels)
+        Retorna:
+            onsets_logits: (B, T, n_notes)
+            frames_logits: (B, T, n_notes)
+        """
         x = mel.permute(0, 2, 1).unsqueeze(1)  # (B, 1, n_mels, T)
         x = self.cnn(x)                        # (B, d_model, n_mels', T_reduced)
         x = x.mean(2)                          # promedio sobre frecuencia -> (B, d_model, T)
@@ -76,11 +81,12 @@ class CnnTransformerOnsetsFrames(nn.Module):
         x = self.transformer(x)
 
         # Cabezal Onsets
-        onsets_logits = self.fc_onsets(x)
-        onsets_probs = torch.sigmoid(onsets_logits)  # opcional: para concatenar como probabilidad
+        onsets_logits = self.fc_onsets(x)  # (B, T, n_notes)
 
-        # Cabezal Frames (usa la información de onsets)
-        x_combined = torch.cat([x, onsets_probs], dim=-1)
-        frames_logits = self.fc_frames(x_combined)
+        if onsets_logits.size(-1) > self.fc_frames.in_features - x.size(-1):
+            onsets_logits = onsets_logits[:, :, :self.fc_frames.in_features - x.size(-1)]
+        
+        x_combined = torch.cat([x, onsets_logits.detach()], dim=-1)
+        frames_logits = self.fc_frames(x_combined)  # (B, T, n_notes)
 
         return onsets_logits, frames_logits

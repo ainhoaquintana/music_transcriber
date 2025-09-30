@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from utils import audio_to_mel
 import librosa
 import pretty_midi
 
@@ -45,44 +46,54 @@ class MaestroDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def _audio_to_mel(self, path):
-        y, _ = librosa.load(path, sr=self.sr, mono=True)
-        S = librosa.feature.melspectrogram(
-            y=y, sr=self.sr, n_mels=self.n_mels, hop_length=self.hop_length
-        )
-        S_db = librosa.power_to_db(S, ref=np.max)
-        S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
-        return S_norm.T.astype(np.float32)
+    # def _audio_to_mel(self, path):
+    #     y, _ = librosa.load(path, sr=self.sr, mono=True)
+    #     S = librosa.feature.melspectrogram(
+    #         y=y, sr=self.sr, n_mels=self.n_mels, hop_length=self.hop_length
+    #     )
+    #     S_db = librosa.power_to_db(S, ref=np.max)
+    #     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
+    #     return S_norm.T.astype(np.float32)
 
     def _midi_to_labels(self, path, n_frames):
         pm = pretty_midi.PrettyMIDI(path)
         frame_time = self.hop_length / self.sr
-        notes = np.zeros((n_frames, 88), np.float32)
-        durs = np.zeros((n_frames, 88), np.float32)
+
+        onsets = np.zeros((n_frames, 88), np.float32)
+        frames = np.zeros((n_frames, 88), np.float32)
 
         for inst in pm.instruments:
             for note in inst.notes:
                 p = note.pitch - MIN_MIDI
-                if 0 <= p < 88:
-                    start = int(np.floor(note.start / frame_time))
-                    end = int(np.ceil(note.end / frame_time))
-                    if start >= n_frames:
-                        continue
-                    end = min(end, n_frames - 1)
-                    notes[start:end + 1, p] = 1.0
-                    durs[start, p] = note.end - note.start
-        return notes, durs
+                if not (0 <= p < 88):
+                    continue
+
+                start = int(np.floor(note.start / frame_time))
+                end = int(np.ceil(note.end / frame_time))
+
+                if start >= n_frames:
+                    continue
+
+                end = min(end, n_frames - 1)
+
+                # 🔥 onset solo en el primer frame
+                onsets[start, p] = 1.0
+                # 🔥 frames en todo el rango activo
+                frames[start:end + 1, p] = 1.0
+
+        return onsets, frames
+
 
     def __getitem__(self, idx):
         wav_path, midi_path = self.pairs[idx]
-        mel = self._audio_to_mel(wav_path)
+        mel = audio_to_mel(wav_path)
+        # mel = self._audio_to_mel(wav_path)
         n_frames = mel.shape[0]
-        notes, durs = self._midi_to_labels(midi_path, n_frames)
-
+        onsets, frames = self._midi_to_labels(midi_path, n_frames)
         return (
             torch.from_numpy(mel),
-            torch.from_numpy(notes),
-            torch.from_numpy(durs),
+            torch.from_numpy(onsets),
+            torch.from_numpy(frames),
         )
 
 
@@ -116,42 +127,52 @@ class MusicNetDataset(Dataset):
     def __len__(self):
         return len(self.pairs)
 
-    def _audio_to_mel(self, path):
-        y, _ = librosa.load(path, sr=self.sr, mono=True)
-        S = librosa.feature.melspectrogram(
-            y=y, sr=self.sr, n_mels=self.n_mels, hop_length=self.hop_length
-        )
-        S_db = librosa.power_to_db(S, ref=np.max)
-        S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
-        return S_norm.T.astype(np.float32)
+    # def _audio_to_mel(self, path):
+    #     y, _ = librosa.load(path, sr=self.sr, mono=True)
+    #     S = librosa.feature.melspectrogram(
+    #         y=y, sr=self.sr, n_mels=self.n_mels, hop_length=self.hop_length
+    #     )
+    #     S_db = librosa.power_to_db(S, ref=np.max)
+    #     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
+    #     return S_norm.T.astype(np.float32)
 
     def _midi_to_labels(self, path, n_frames):
         pm = pretty_midi.PrettyMIDI(path)
         frame_time = self.hop_length / self.sr
-        notes = np.zeros((n_frames, 88), np.float32)
-        durs = np.zeros((n_frames, 88), np.float32)
+
+        onsets = np.zeros((n_frames, 88), np.float32)
+        frames = np.zeros((n_frames, 88), np.float32)
 
         for inst in pm.instruments:
             for note in inst.notes:
                 p = note.pitch - MIN_MIDI
-                if 0 <= p < 88:
-                    start = int(np.floor(note.start / frame_time))
-                    end = int(np.ceil(note.end / frame_time))
-                    if start >= n_frames:
-                        continue
-                    end = min(end, n_frames - 1)
-                    notes[start:end + 1, p] = 1.0
-                    durs[start, p] = note.end - note.start
-        return notes, durs
+                if not (0 <= p < 88):
+                    continue
+
+                start = int(np.floor(note.start / frame_time))
+                end = int(np.ceil(note.end / frame_time))
+
+                if start >= n_frames:
+                    continue
+
+                end = min(end, n_frames - 1)
+
+                # 🔥 onset solo en el primer frame
+                onsets[start, p] = 1.0
+                # 🔥 frames en todo el rango activo
+                frames[start:end + 1, p] = 1.0
+
+        return onsets, frames
+
 
     def __getitem__(self, idx):
         wav_path, midi_path = self.pairs[idx]
-        mel = self._audio_to_mel(wav_path)
+        # mel = self._audio_to_mel(wav_path)
+        mel = audio_to_mel(wav_path)
         n_frames = mel.shape[0]
-        notes, durs = self._midi_to_labels(midi_path, n_frames)
-
+        onsets, frames = self._midi_to_labels(midi_path, n_frames)
         return (
             torch.from_numpy(mel),
-            torch.from_numpy(notes),
-            torch.from_numpy(durs),
+            torch.from_numpy(onsets),
+            torch.from_numpy(frames),
         )

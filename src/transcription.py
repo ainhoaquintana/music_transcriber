@@ -1,3 +1,4 @@
+# transcription.py
 import sys
 import os
 import torch
@@ -6,27 +7,39 @@ import pretty_midi
 from music21 import converter, metadata, instrument, tempo
 from model import CnnTransformerOnsetsFrames
 import librosa
+from utils import audio_to_mel
 import numpy as np
 
-# --- Constantes globales ---
-WINDOW_SIZE = 10000
-STRIDE = 8000
-HOP_LENGTH = 256
+# ---------------- Configuración global ----------------
 SR = 16000
+HOP_LENGTH = 512
 
-THRESHOLD = 0.87
+MIN_DURATION_SEC = 0.15
+MIN_FRAMES = 5
+PITCH_OFFSET = 5
+
+# Sliding window (audios largos)
+WINDOW_SIZE = 20000
+STRIDE = 15000
+
+# Post-procesado
 MEDIAN_WINDOW = 9
+ONSET_MULTIPLIER = 4.0
+FRAME_MULTIPLIER = 1.1
+FRAME_OFF_HYST = 3
+TOPK = 0
 
-TOPK = 2                # máximo de notas por frame
-MIN_DURATION_SEC = 0.10 # mínimo de duración de una nota (s)
-PITCH_OFFSET = 5        # offset de semitonos para corregir pitch
-# ---------------------------
+# ---------------- Funciones de inferencia ----------------
 
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
+    """Inferencia por chunks concatenados (T, N)"""
     if isinstance(mel, np.ndarray):
         mel = torch.tensor(mel, dtype=torch.float32)
     if mel.ndim == 2:
-        mel = mel.unsqueeze(0)  # (1, T, n_mels)
+        mel = mel.unsqueeze(0)
+
+    model = model.to(device)
+    model.eval()
 
     T = mel.shape[1]
     onsets_list, frames_list = [], []
@@ -35,57 +48,119 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
         end = min(start + window_size, T)
         mel_chunk = mel[:, start:end, :].to(device)
         with torch.no_grad():
-            onsets_logits, frames_logits = model(mel_chunk)
-        onsets_list.append(onsets_logits.cpu())
-        frames_list.append(frames_logits.cpu())
+            onsets_logits_chunk, frames_logits_chunk = model(mel_chunk)
+        onsets_list.append(onsets_logits_chunk.cpu())
+        frames_list.append(frames_logits_chunk.cpu())
         if end == T:
             break
 
-    onsets_full = torch.cat(onsets_list, dim=1)
-    frames_full = torch.cat(frames_list, dim=1)
-    return onsets_full[0], frames_full[0]
+    onsets_full = torch.cat(onsets_list, dim=1)[0]  # (T, N)
+    frames_full = torch.cat(frames_list, dim=1)[0]
+    return onsets_full, frames_full
 
-def infer_notes_from_onsets_frames(model, mel, device, threshold=THRESHOLD, median_window=MEDIAN_WINDOW):
-    onsets_logits, frames_logits = infer_with_sliding_window(model, mel, device)
+# ---------------- Funciones de post-procesado ----------------
 
-    onsets_bin = (torch.sigmoid(onsets_logits) > threshold).int()
-    frames_bin = (torch.sigmoid(frames_logits) > threshold).int()
+def median_smooth_probabilities(prob, k):
+    """Suavizado mediano en frames (T, N)"""
+    if k <= 1:
+        return prob
+    pad = k // 2
+    prob_padded = np.pad(prob, ((pad, pad), (0, 0)), mode='edge')
+    T = prob.shape[0]
+    sm = np.zeros_like(prob)
+    for t in range(T):
+        sm[t] = np.median(prob_padded[t:t + k, :], axis=0)
+    return sm
 
-    # Median filter along time dimension
-    pad = median_window // 2
-    frames_bin_padded = F.pad(frames_bin.T.unsqueeze(0).float(), (pad, pad), mode='replicate')
-    frames_smooth = frames_bin_padded.unfold(2, median_window, 1).median(dim=3).values.squeeze(0).T.int()
+def onset_peak_picking(onset_probs, onset_thresh, width=0):
+    """Detecta picos locales en onsets (T, N)"""
+    T, N = onset_probs.shape
+    peaks = np.zeros_like(onset_probs, dtype=np.bool_)
+    for n in range(N):
+        col = onset_probs[:, n]
+        for t in range(T):
+            if col[t] <= onset_thresh:
+                continue
+            left = col[max(0, t - width):t]
+            right = col[t + 1:t + 1 + width]
+            if (left.size == 0 or col[t] >= left.max()) and (right.size == 0 or col[t] >= right.max()):
+                peaks[t, n] = True
+    return peaks
 
-    T, N = onsets_bin.shape
-    notes_bin = torch.zeros_like(frames_smooth)
-    active_notes = {}
+def notes_from_probs(onset_probs, frame_probs, hop_length=HOP_LENGTH, sr=SR,
+                     onset_multiplier=ONSET_MULTIPLIER, frame_multiplier=FRAME_MULTIPLIER,
+                     median_window=MEDIAN_WINDOW, min_duration_sec=MIN_DURATION_SEC,
+                     min_frames=MIN_FRAMES, frame_off_hyst=FRAME_OFF_HYST, topk=TOPK):
+    """Convierte probabilidades a piano-roll binario con polifonía automática"""
+    on_p = onset_probs.copy()
+    fr_p = frame_probs.copy()
 
+    # suavizado mediano frames
+    fr_p = median_smooth_probabilities(fr_p, median_window)
+
+    # umbrales dinámicos
+    mean_on = max(0.01, on_p.mean())
+    mean_fr = max(0.01, fr_p.mean())
+    onset_thresh = mean_on * onset_multiplier
+    frame_thresh = mean_fr * frame_multiplier
+
+    # peak picking onsets
+    onset_peaks = onset_peak_picking(on_p, onset_thresh)
+
+    T, N = on_p.shape
+    notes_bin = np.zeros((T, N), dtype=np.int32)
+
+    active = {}  # pitch -> (start_frame, below_count)
+    for t in range(T):
+        if topk and topk > 0:
+            topk_idx = np.argsort(fr_p[t])[::-1][:topk]
+            frame_mask = np.zeros(N, dtype=bool)
+            frame_mask[topk_idx] = True
+        else:
+            frame_mask = fr_p[t] >= frame_thresh
+
+        for n in range(N):
+            if onset_peaks[t, n] and frame_mask[n]:
+                if n not in active:
+                    active[n] = (t, 0)
+                notes_bin[t, n] = 1
+            elif n in active:
+                s, below = active[n]
+                if frame_mask[n]:
+                    active[n] = (s, 0)
+                    notes_bin[t, n] = 1
+                else:
+                    below += 1
+                    if below >= frame_off_hyst:
+                        active.pop(n)
+                    else:
+                        active[n] = (s, below)
+                        notes_bin[t, n] = 1
+
+    # filtrar por duración mínima
+    frame_dur = hop_length / sr
+    final_roll = np.zeros_like(notes_bin)
+    active = {}
     for t in range(T):
         for n in range(N):
-            if onsets_bin[t, n]:
-                notes_bin[t, n] = 1
-                active_notes[n] = t
-            elif n in active_notes and frames_smooth[t, n]:
-                notes_bin[t, n] = 1
-            elif n in active_notes and not frames_smooth[t, n]:
-                active_notes.pop(n)
+            if notes_bin[t, n]:
+                if n not in active:
+                    active[n] = t
+            else:
+                if n in active:
+                    s = active.pop(n)
+                    dur_frames = t - s
+                    dur_sec = dur_frames * frame_dur
+                    if dur_sec >= min_duration_sec and dur_frames >= min_frames:
+                        final_roll[s:t, n] = 1
+    for n, s in active.items():
+        dur_frames = T - s
+        dur_sec = dur_frames * frame_dur
+        if dur_sec >= min_duration_sec and dur_frames >= min_frames:
+            final_roll[s:T, n] = 1
+    return final_roll
 
-        # --- Top-k filtering por frame ---
-        if TOPK > 0:
-            probs = torch.sigmoid(frames_logits[t])
-            topk_idx = torch.topk(probs, TOPK).indices
-            mask = torch.zeros_like(notes_bin[t])
-            mask[topk_idx] = 1
-            notes_bin[t] = notes_bin[t] * mask
-
-    return notes_bin
-
-def audio_to_mel(audio_path, sr=SR, n_mels=229, hop_length=HOP_LENGTH):
-    y, _ = librosa.load(audio_path, sr=sr)
-    S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, hop_length=hop_length)
-    S_db = librosa.power_to_db(S, ref=np.max)
-    S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
-    return S_norm.T.astype(np.float32)
+# ---------------- Funciones de I/O ----------------
 
 def detect_tempo(audio_path, sr=SR):
     y, _ = librosa.load(audio_path, sr=sr)
@@ -93,67 +168,65 @@ def detect_tempo(audio_path, sr=SR):
     return tempo
 
 def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH,
-                  tempo_bpm=120, min_duration_sec=MIN_DURATION_SEC, max_duration_sec=2.0, min_frames=3):
-    midi = pretty_midi.PrettyMIDI()
-    piano = pretty_midi.Instrument(program=0)
-
+                  tempo_bpm=120, min_duration_sec=MIN_DURATION_SEC, max_duration_sec=2.0, min_frames=MIN_FRAMES):
+    if isinstance(notes_bin, torch.Tensor):
+        notes_bin = notes_bin.cpu().numpy().astype(np.int32)
     T, N = notes_bin.shape
-    frame_duration = hop_length / sr
-    active_notes = {}
+    frame_duration = float(hop_length) / float(sr)
 
+    midi = pretty_midi.PrettyMIDI(initial_tempo=float(tempo_bpm))
+    piano = pretty_midi.Instrument(program=0)
+    active = {}
     for t in range(T):
         for n in range(N):
             if notes_bin[t, n]:
-                if n not in active_notes:
-                    active_notes[n] = t
+                if n not in active:
+                    active[n] = t
             else:
-                if n in active_notes:
-                    start_frame = active_notes.pop(n)
-                    duration_frames = t - start_frame
-                    duration = duration_frames * frame_duration
-                    if duration >= min_duration_sec and duration_frames >= min_frames:
-                        duration = min(duration, max_duration_sec)
+                if n in active:
+                    s = active.pop(n)
+                    dur_frames = t - s
+                    dur_sec = dur_frames * frame_duration
+                    if dur_sec >= min_duration_sec and dur_frames >= min_frames:
+                        dur_sec = min(dur_sec, max_duration_sec)
                         note = pretty_midi.Note(
                             velocity=100,
                             pitch=int(n) + 21 + PITCH_OFFSET,
-                            start=start_frame * frame_duration,
-                            end=start_frame * frame_duration + duration
+                            start=float(s) * frame_duration,
+                            end=float(s) * frame_duration + float(dur_sec)
                         )
                         piano.notes.append(note)
-
-    # Cerrar las notas activas hasta el final
-    for n, start_frame in active_notes.items():
-        duration_frames = T - start_frame
-        duration = duration_frames * frame_duration
-        if duration >= min_duration_sec and duration_frames >= min_frames:
-            duration = min(duration, max_duration_sec)
+    for n, s in active.items():
+        dur_frames = T - s
+        dur_sec = dur_frames * frame_duration
+        if dur_sec >= min_duration_sec and dur_frames >= min_frames:
+            dur_sec = min(dur_sec, max_duration_sec)
             note = pretty_midi.Note(
                 velocity=100,
                 pitch=int(n) + 21 + PITCH_OFFSET,
-                start=start_frame * frame_duration,
-                end=start_frame * frame_duration + duration
+                start=float(s) * frame_duration,
+                end=float(s) * frame_duration + float(dur_sec)
             )
             piano.notes.append(note)
 
     midi.instruments.append(piano)
     midi.write(output_path)
-    print(f"MIDI saved to {output_path}")
+    print(f"MIDI saved to {output_path} with tempo {tempo_bpm} BPM")
 
 def midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=120):
     score = converter.parse(midi_path)
     score.metadata = metadata.Metadata()
     score.metadata.title = audio_name
-    score.metadata.composer = "Your Name"
-
+    score.metadata.composer = "Auto Transcriber"
     mm = tempo.MetronomeMark(number=tempo_bpm)
     score.insert(0, mm)
-
     for part in score.parts:
         part.insert(0, instrument.Piano())
         part.partName = "Piano"
-
     score.write('musicxml', xml_path)
     print(f"MusicXML saved to {xml_path}")
+
+# ---------------- Main ----------------
 
 def main(audio_path):
     audio_name = os.path.splitext(os.path.basename(audio_path))[0]
@@ -164,14 +237,25 @@ def main(audio_path):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CnnTransformerOnsetsFrames(d_model=512, num_layers=6, nhead=8)
-    model.load_state_dict(torch.load("../checkpoints/modelo_entrenado.pth", map_location=device))
+    model.load_state_dict(torch.load("../checkpoints/modelo_entrenado_sin_fine_tuning.pth", map_location=device))
     model.to(device)
     model.eval()
 
     mel = audio_to_mel(audio_path)
     tempo_bpm = detect_tempo(audio_path)
-    notes_bin = infer_notes_from_onsets_frames(model, mel, device)
-    notes_to_midi(notes_bin, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm)
+
+    onsets_logits, frames_logits = infer_with_sliding_window(model, mel, device)
+    onsets_probs = torch.sigmoid(onsets_logits).cpu().numpy()
+    frames_probs = torch.sigmoid(frames_logits).cpu().numpy()
+
+    print("📊 Mean onset prob:", onsets_probs.mean())
+    print("📊 Max onset prob:", onsets_probs.max())
+    print("📊 Mean frame prob:", frames_probs.mean())
+    print("📊 Max frame prob:", frames_probs.max())
+
+    notes_roll = notes_from_probs(onsets_probs, frames_probs)
+
+    notes_to_midi(notes_roll, midi_path, sr=SR, hop_length=HOP_LENGTH, tempo_bpm=tempo_bpm)
     midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=tempo_bpm)
 
 if __name__ == "__main__":
