@@ -13,26 +13,23 @@ import numpy as np
 # ---------------- Configuración global ----------------
 SR = 16000
 HOP_LENGTH = 512
-
 MIN_DURATION_SEC = 0.15
 MIN_FRAMES = 5
 PITCH_OFFSET = 5
 
-# Sliding window (audios largos)
+# Sliding window
 WINDOW_SIZE = 20000
 STRIDE = 15000
 
 # Post-procesado
 MEDIAN_WINDOW = 9
-ONSET_MULTIPLIER = 4.0
-FRAME_MULTIPLIER = 1.1
+ONSET_MULTIPLIER = 1.0  # ajustado para detectar onsets
+FRAME_MULTIPLIER = 1.0  # ajustado para frames
 FRAME_OFF_HYST = 3
 TOPK = 0
 
 # ---------------- Funciones de inferencia ----------------
-
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
-    """Inferencia por chunks concatenados (T, N)"""
     if isinstance(mel, np.ndarray):
         mel = torch.tensor(mel, dtype=torch.float32)
     if mel.ndim == 2:
@@ -54,14 +51,12 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
         if end == T:
             break
 
-    onsets_full = torch.cat(onsets_list, dim=1)[0]  # (T, N)
+    onsets_full = torch.cat(onsets_list, dim=1)[0]
     frames_full = torch.cat(frames_list, dim=1)[0]
     return onsets_full, frames_full
 
-# ---------------- Funciones de post-procesado ----------------
-
+# ---------------- Post-procesado ----------------
 def median_smooth_probabilities(prob, k):
-    """Suavizado mediano en frames (T, N)"""
     if k <= 1:
         return prob
     pad = k // 2
@@ -73,7 +68,6 @@ def median_smooth_probabilities(prob, k):
     return sm
 
 def onset_peak_picking(onset_probs, onset_thresh, width=0):
-    """Detecta picos locales en onsets (T, N)"""
     T, N = onset_probs.shape
     peaks = np.zeros_like(onset_probs, dtype=np.bool_)
     for n in range(N):
@@ -91,28 +85,23 @@ def notes_from_probs(onset_probs, frame_probs, hop_length=HOP_LENGTH, sr=SR,
                      onset_multiplier=ONSET_MULTIPLIER, frame_multiplier=FRAME_MULTIPLIER,
                      median_window=MEDIAN_WINDOW, min_duration_sec=MIN_DURATION_SEC,
                      min_frames=MIN_FRAMES, frame_off_hyst=FRAME_OFF_HYST, topk=TOPK):
-    """Convierte probabilidades a piano-roll binario con polifonía automática"""
+
     on_p = onset_probs.copy()
     fr_p = frame_probs.copy()
-
-    # suavizado mediano frames
     fr_p = median_smooth_probabilities(fr_p, median_window)
 
-    # umbrales dinámicos
-    mean_on = max(0.01, on_p.mean())
-    mean_fr = max(0.01, fr_p.mean())
-    onset_thresh = mean_on * onset_multiplier
-    frame_thresh = mean_fr * frame_multiplier
+    onset_thresh = max(0.01, on_p.mean()) * onset_multiplier
+    frame_thresh = max(0.01, fr_p.mean()) * frame_multiplier
 
-    # peak picking onsets
     onset_peaks = onset_peak_picking(on_p, onset_thresh)
+    print("Num detected onsets:", onset_peaks.sum())
 
     T, N = on_p.shape
     notes_bin = np.zeros((T, N), dtype=np.int32)
 
-    active = {}  # pitch -> (start_frame, below_count)
+    active = {}
     for t in range(T):
-        if topk and topk > 0:
+        if topk > 0:
             topk_idx = np.argsort(fr_p[t])[::-1][:topk]
             frame_mask = np.zeros(N, dtype=bool)
             frame_mask[topk_idx] = True
@@ -160,15 +149,15 @@ def notes_from_probs(onset_probs, frame_probs, hop_length=HOP_LENGTH, sr=SR,
             final_roll[s:T, n] = 1
     return final_roll
 
-# ---------------- Funciones de I/O ----------------
-
+# ---------------- I/O ----------------
 def detect_tempo(audio_path, sr=SR):
     y, _ = librosa.load(audio_path, sr=sr)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    return tempo
+    return float(tempo)
 
 def notes_to_midi(notes_bin, output_path="output.midi", sr=SR, hop_length=HOP_LENGTH,
                   tempo_bpm=120, min_duration_sec=MIN_DURATION_SEC, max_duration_sec=2.0, min_frames=MIN_FRAMES):
+
     if isinstance(notes_bin, torch.Tensor):
         notes_bin = notes_bin.cpu().numpy().astype(np.int32)
     T, N = notes_bin.shape
@@ -227,7 +216,6 @@ def midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=120):
     print(f"MusicXML saved to {xml_path}")
 
 # ---------------- Main ----------------
-
 def main(audio_path):
     audio_name = os.path.splitext(os.path.basename(audio_path))[0]
     output_dir = os.path.join("outputs", audio_name)
@@ -237,7 +225,8 @@ def main(audio_path):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CnnTransformerOnsetsFrames(d_model=512, num_layers=6, nhead=8)
-    model.load_state_dict(torch.load("../checkpoints/modelo_entrenado_sin_fine_tuning.pth", map_location=device))
+    model.load_state_dict(torch.load("../checkpoints/modelo_final_focal.pth", map_location=device))
+    # model.load_state_dict(torch.load("../checkpoints/modelo_finetuned_monophonic.pth", map_location=device))
     model.to(device)
     model.eval()
 
