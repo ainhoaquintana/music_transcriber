@@ -8,14 +8,12 @@ import librosa
 import numpy as np
 import pretty_midi
 
-# Parámetros
 WINDOW_SIZE = 10000
 STRIDE = 8000
 HOP_LENGTH = 256
 SR = 16000
 THRESHOLD = 0.5
 
-# Función para convertir audio a mel
 def audio_to_mel(audio_path, sr=SR, n_mels=229, hop_length=HOP_LENGTH):
     y, _ = librosa.load(audio_path, sr=sr)
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, hop_length=hop_length)
@@ -23,7 +21,6 @@ def audio_to_mel(audio_path, sr=SR, n_mels=229, hop_length=HOP_LENGTH):
     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
     return S_norm.T.astype(np.float32)
 
-# Inferencia con sliding window
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
     if isinstance(mel, np.ndarray):
         mel = torch.tensor(mel, dtype=torch.float32)
@@ -47,7 +44,6 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
     frames_full = torch.cat(frames_list, dim=1)
     return onsets_full[0], frames_full[0]
 
-# Reconstruir notas a partir de onsets y frames
 def infer_notes_from_onsets_frames(model, mel, device, threshold=THRESHOLD):
     onsets_logits, frames_logits = infer_with_sliding_window(model, mel, device)
     onsets_probs = torch.sigmoid(onsets_logits)
@@ -72,7 +68,6 @@ def infer_notes_from_onsets_frames(model, mel, device, threshold=THRESHOLD):
 
     return notes_bin, onsets_probs, frames_probs
 
-# Guardar MIDI de prueba
 def notes_to_midi(notes_bin, output_path="debug_test.midi", sr=SR, hop_length=HOP_LENGTH):
     midi = pretty_midi.PrettyMIDI()
     piano = pretty_midi.Instrument(program=0)
@@ -111,7 +106,6 @@ def notes_to_midi(notes_bin, output_path="debug_test.midi", sr=SR, hop_length=HO
     midi.write(output_path)
     print(f"MIDI saved to {output_path}")
 
-# Main debug
 def main(audio_path):
     audio_name = os.path.splitext(os.path.basename(audio_path))[0]
     output_dir = os.path.join("outputs", audio_name)
@@ -126,7 +120,6 @@ def main(audio_path):
     mel = audio_to_mel(audio_path)
     notes_bin, onsets_probs, frames_probs = infer_notes_from_onsets_frames(model, mel, device)
 
-    # Visualización
     plt.figure(figsize=(12,6))
     plt.subplot(3,1,1)
     plt.imshow(onsets_probs.cpu().T, aspect='auto', origin='lower', cmap='Reds')

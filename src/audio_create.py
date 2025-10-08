@@ -10,7 +10,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Carpeta donde están los soundfonts
 SOUNDFONT_DIR = "../soundfonts"
-SOUNDFONT_FILE = "GeneralUser-GS.sf2"  # Cambia por el SF2 que tengas
+SOUNDFONT_FILE = "GeneralUser-GS.sf2" 
 SOUNDFONT_PATH = os.path.join(SOUNDFONT_DIR, SOUNDFONT_FILE)
 
 # Parámetros
@@ -24,7 +24,6 @@ MAX_DURATION = 1.0
 SAMPLE_RATE = 16000
 
 def generate_random_melody():
-    """Genera una melodía monofónica aleatoria como PrettyMIDI."""
     pm = pretty_midi.PrettyMIDI()
     piano = pretty_midi.Instrument(program=0)  # Piano acústico
     current_time = 0.0
@@ -46,7 +45,6 @@ def generate_random_melody():
     return pm
 
 def midi_to_wav(pm, wav_path, sf2_path=SOUNDFONT_PATH, sr=SAMPLE_RATE):
-    """Genera WAV usando PrettyMIDI y un soundfont .sf2"""
     if not os.path.isfile(sf2_path):
         raise FileNotFoundError(f"Soundfont no encontrado: {sf2_path}")
     audio = pm.fluidsynth(fs=sr, sf2_path=sf2_path)

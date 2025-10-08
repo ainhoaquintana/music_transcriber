@@ -1,4 +1,3 @@
-# finetune_monophonic.py
 import os
 import torch
 import torch.nn as nn
@@ -6,11 +5,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
-from dataset import MyDataset  # dataset monofónico
+from dataset import MyDataset 
 from model import CnnTransformerOnsetsFrames
 from utils import collate_fn
 
-# Hiperparámetros
 BATCH_SIZE = 4
 LR = 1e-5
 WEIGHT_DECAY = 1e-4
@@ -19,7 +17,6 @@ FRAME_LOSS_FACTOR = 5.0
 MAX_GRAD_NORM = 1.0
 EARLY_STOP_PATIENCE = 3
 
-# Focal loss
 class FocalLoss(nn.Module):
     def __init__(self, alpha=1.0, gamma=2.0, reduction='mean'):
         super().__init__()
@@ -36,7 +33,6 @@ class FocalLoss(nn.Module):
             return focal_loss.mean()
         return focal_loss.sum()
 
-# Early stopping
 class EarlyStopping:
     def __init__(self, patience=3, delta=0.0):
         self.patience = patience
@@ -59,7 +55,6 @@ class EarlyStopping:
     def load_best_model(self, model):
         model.load_state_dict(self.best_state)
 
-# Entrenamiento y validación
 def train_one_epoch(model, loader, optimizer, criterion_onsets, criterion_frames, device):
     model.train()
     running_loss = 0.0
@@ -92,7 +87,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    # Dataset monofónico
     dataset_root = "../data/my_audios"
     dataset = MyDataset(dataset_root)
     n_total = len(dataset)
@@ -102,7 +96,6 @@ def main():
     train_loader = DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
-    # Modelo
     model = CnnTransformerOnsetsFrames(d_model=512, num_layers=6, nhead=8)
     model.load_state_dict(torch.load("../checkpoints/modelo_final_focal.pth", map_location=device))
     model.to(device)
@@ -128,7 +121,7 @@ def main():
     os.makedirs("../checkpoints", exist_ok=True)
     early_stopping.load_best_model(model)
     torch.save(model.state_dict(), "../checkpoints/modelo_finetuned_monophonic.pth")
-    print("✅ Fine-tuned monophonic model saved!")
+    print("Fine-tuned monophonic model saved!")
 
 if __name__ == "__main__":
     main()

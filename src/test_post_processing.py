@@ -5,14 +5,12 @@ import numpy as np
 import pandas as pd
 from model import CnnTransformerOnsetsFrames
 
-# Parámetros globales
 SR = 16000
 HOP_LENGTH = 256
 N_MELS = 229
 N_NOTES = 88  # MIDI 21 - 108
 
 def audio_to_mel_array(y, sr=SR, n_mels=N_MELS, hop_length=HOP_LENGTH):
-    """Convierte audio en un mel-espectrograma normalizado (frames x mels)."""
     S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, hop_length=hop_length)
     S_db = librosa.power_to_db(S, ref=np.max)
     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-6)
@@ -28,20 +26,18 @@ def main():
     output_path = sys.argv[2] if len(sys.argv) > 2 else "salida.csv"
 
     y, sr = librosa.load(audio_path, sr=SR)
-    print(f"✅ Audio cargado: {audio_path} ({len(y)/sr:.2f}s, {sr} Hz)")
+    print(f"Audio cargado: {audio_path} ({len(y)/sr:.2f}s, {sr} Hz)")
 
     mel = audio_to_mel_array(y)
     T = mel.shape[0]
-    print(f"✅ Mel espectrograma: {mel.shape} (frames x mels)")
+    print(f"Mel espectrograma: {mel.shape} (frames x mels)")
 
-    # 3️⃣ Cargar modelo
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = CnnTransformerOnsetsFrames(d_model=512, n_mels=N_MELS, n_notes=N_NOTES)
     model.load_state_dict(torch.load("../checkpoints/modelo_entrenado_sin_fine_tuning.pth", map_location=device))
     model.to(device)
     model.eval()
 
-    # 4️⃣ Inferencia
     mel_t = torch.tensor(mel).unsqueeze(0).to(device)  # (1, T, n_mels)
     with torch.no_grad():
         _, frames_logits = model(mel_t)
@@ -80,8 +76,8 @@ def main():
 
     
     df.to_csv(output_path, index=False)
-    print(f"✅ CSV con probabilidades guardado en: {output_path}")
-    print("📊 Columnas: Time(s), Note_21...Note_108, Top1_MIDI, Top1_Prob, Top2_MIDI, ...")
+    print(f"CSV con probabilidades guardado en: {output_path}")
+    print("Columnas: Time(s), Note_21...Note_108, Top1_MIDI, Top1_Prob, Top2_MIDI, ...")
 
 
 if __name__ == "__main__":

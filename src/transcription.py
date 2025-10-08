@@ -1,8 +1,6 @@
-# transcription.py
 import sys
 import os
 import torch
-import torch.nn.functional as F
 import pretty_midi
 from music21 import converter, metadata, instrument, tempo
 from model import CnnTransformerOnsetsFrames
@@ -10,25 +8,21 @@ import librosa
 from utils import audio_to_mel
 import numpy as np
 
-# ---------------- Configuración global ----------------
 SR = 16000
 HOP_LENGTH = 512
 MIN_DURATION_SEC = 0.15
 MIN_FRAMES = 5
 PITCH_OFFSET = 5
 
-# Sliding window
 WINDOW_SIZE = 20000
 STRIDE = 15000
 
-# Post-procesado
 MEDIAN_WINDOW = 9
 ONSET_MULTIPLIER = 1.0  # ajustado para detectar onsets
 FRAME_MULTIPLIER = 1.0  # ajustado para frames
 FRAME_OFF_HYST = 3
 TOPK = 0
 
-# ---------------- Funciones de inferencia ----------------
 def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, stride=STRIDE):
     if isinstance(mel, np.ndarray):
         mel = torch.tensor(mel, dtype=torch.float32)
@@ -55,7 +49,6 @@ def infer_with_sliding_window(model, mel, device, window_size=WINDOW_SIZE, strid
     frames_full = torch.cat(frames_list, dim=1)[0]
     return onsets_full, frames_full
 
-# ---------------- Post-procesado ----------------
 def median_smooth_probabilities(prob, k):
     if k <= 1:
         return prob
@@ -126,7 +119,6 @@ def notes_from_probs(onset_probs, frame_probs, hop_length=HOP_LENGTH, sr=SR,
                         active[n] = (s, below)
                         notes_bin[t, n] = 1
 
-    # filtrar por duración mínima
     frame_dur = hop_length / sr
     final_roll = np.zeros_like(notes_bin)
     active = {}
@@ -149,7 +141,6 @@ def notes_from_probs(onset_probs, frame_probs, hop_length=HOP_LENGTH, sr=SR,
             final_roll[s:T, n] = 1
     return final_roll
 
-# ---------------- I/O ----------------
 def detect_tempo(audio_path, sr=SR):
     y, _ = librosa.load(audio_path, sr=sr)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
@@ -215,7 +206,6 @@ def midi_to_musicxml(midi_path, xml_path, audio_name, tempo_bpm=120):
     score.write('musicxml', xml_path)
     print(f"MusicXML saved to {xml_path}")
 
-# ---------------- Main ----------------
 def main(audio_path):
     audio_name = os.path.splitext(os.path.basename(audio_path))[0]
     output_dir = os.path.join("outputs", audio_name)
@@ -237,10 +227,10 @@ def main(audio_path):
     onsets_probs = torch.sigmoid(onsets_logits).cpu().numpy()
     frames_probs = torch.sigmoid(frames_logits).cpu().numpy()
 
-    print("📊 Mean onset prob:", onsets_probs.mean())
-    print("📊 Max onset prob:", onsets_probs.max())
-    print("📊 Mean frame prob:", frames_probs.mean())
-    print("📊 Max frame prob:", frames_probs.max())
+    print("Mean onset prob:", onsets_probs.mean())
+    print("Max onset prob:", onsets_probs.max())
+    print("Mean frame prob:", frames_probs.mean())
+    print("Max frame prob:", frames_probs.max())
 
     notes_roll = notes_from_probs(onsets_probs, frames_probs)
 

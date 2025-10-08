@@ -1,5 +1,5 @@
 from dataset import MaestroDataset
-from model import CnnTransformerTranscriber
+from model import CnnTransformerOnsetsFrames
 import torch
 
 dataset = MaestroDataset("..\data\maestro-v3.0.0")
@@ -7,7 +7,7 @@ dataset = MaestroDataset("..\data\maestro-v3.0.0")
 mel, notes, durs = dataset[0]
 print("mel:", mel.shape, "notes:", notes.shape, "durs:", durs.shape)
 
-model = CnnTransformerTranscriber()
+model = CnnTransformerOnsetsFrames()
 model.eval()
 with torch.no_grad():
     logits, dur_preds = model(mel.unsqueeze(0))
